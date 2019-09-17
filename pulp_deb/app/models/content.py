@@ -10,6 +10,11 @@ from pulpcore.plugin.models import Content
 BOOL_CHOICES = [(True, "yes"), (False, "no")]
 
 
+class DebVersionField(models.Field):
+    def db_type(self, connection):
+        return 'debversion'
+
+
 class GenericContent(Content):
     """
     The "generic" content.
@@ -145,7 +150,7 @@ class BasePackage(Content):
 
     package = models.TextField()  # package name
     source = models.TextField(null=True)  # source package name
-    version = models.TextField()
+    version = DebVersionField()
     architecture = models.TextField()  # all, i386, ...
     section = models.TextField(null=True)  # admin, comm, database, ...
     priority = models.TextField(null=True)  # required, standard, optional, extra
