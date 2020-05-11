@@ -40,10 +40,20 @@ do
 done
 cd ..
 
+mkdir asgard_duplicate
+cd asgard_duplicate
+
+for CTL in ${SRCDIR}/asgard_duplicate/*.ctl
+do
+  equivs-build --arch ppc64 ${CTL}
+done
+cd ..
+
 cp -a ${SRCDIR}/conf .
 reprepro -C asgard includeudeb ragnarok asgard_udebs/*.udeb
 reprepro -C asgard includedeb ragnarok asgard/*.deb
 reprepro -C jotunheimr includedeb ragnarok jotunheimr/*.deb
+reprepro -C asgard_duplicate includedeb rangnarok asgard_duplicate/*.deb
 
 rm dists/ragnarok/jotunheimr/binary-armeb/Packages
 
