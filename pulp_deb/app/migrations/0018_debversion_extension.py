@@ -8,7 +8,7 @@ from django.contrib.postgres.operations import CreateExtension
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('deb', '0007_create_metadata_models'),
+        ('deb', '0017_allow_longer_string_lists.py'),
     ]
 
     operations = [
