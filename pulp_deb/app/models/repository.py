@@ -1,3 +1,10 @@
+from django.conf import settings
+
+from django.db.models import (
+    BooleanField,
+    TextField,
+)
+
 from pulpcore.plugin.models import Repository
 
 from pulpcore.plugin.repo_version_utils import remove_duplicates, validate_version_paths
@@ -39,6 +46,10 @@ class AptRepository(Repository):
         AptRemote,
     ]
 
+    # Space separated list containing a subset of "simple structured verbatim"
+    autopublish_modes = models.TextField(null=False, default='')
+    autopublish = models.BooleanField(default=False)
+
     class Meta:
         default_related_name = "%(app_label)s_%(model_name)s"
 
@@ -75,3 +86,49 @@ class AptRepository(Repository):
             if distribution in distributions:
                 raise DuplicateDistributionException(distribution)
             distributions.append(distribution)
+
+    def on_new_version(self, version):
+        """
+        Called when new repository versions are created.
+        Args:
+            version: The new repository version.
+        """
+        super().on_new_version(version)
+
+        # avoid circular import issues
+        from pulp_deb.app import tasks
+
+        if self.autopublish:
+            if self.autopublish_modes:
+                autopublish_modes = self.autopublish_modes.split()
+            else:
+                autopublish_modes = settings.DEFAULT_AUTOPUBLISH_MODES.split()
+
+            distributions = self.distributions.all()
+
+            if 'verbatim' in autopublish_modes:
+                verbatim_publication = tasks.publish_verbatim(repository_version_pk=version.pk)
+                autopublish_modes.remove('verbatim')
+
+            if autopublish_modes:
+                simple = 'simple' in autopublish_modes
+                structured = 'structured' in autopublish_modes
+                # If neither simple nor structured is the case the following will throw an error.
+                apt_publication = tasks.publish(
+                    repository_version_pk=version.pk,
+                    simple=simple,
+                    structured=structured,
+                    #signing_service_pk=???,
+                )
+
+
+            if distributions:
+                for distribution in distributions:
+                    if distribution.publication.TYPE == "verbatim-publication":
+                        if verbatim_publication:
+                            distirbution.publication = verbatim_publication
+                            distribution.save()
+                    elif distribution.publication.TYPE == "apt-publication":
+                        if apt_publication:
+                            distirbution.publication = apt_publication
+                            distribution.save()
