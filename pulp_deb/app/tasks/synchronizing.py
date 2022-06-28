@@ -22,7 +22,6 @@ from pulpcore.plugin.models import (
     Artifact,
     ProgressReport,
     Remote,
-    Repository,
 )
 
 from pulpcore.plugin.stages import (
@@ -51,6 +50,7 @@ from pulp_deb.app.models import (
     PackageReleaseComponent,
     InstallerPackage,
     AptRemote,
+    AptRepository,
 )
 
 from pulp_deb.app.serializers import (
@@ -137,7 +137,7 @@ class UnknownNoSupportForArchitectureAllValue(Exception):
     pass
 
 
-def synchronize(remote_pk, repository_pk, mirror):
+def synchronize(remote_pk, repository_pk, mirror, optimize):
     """
     Sync content from the remote repository.
 
@@ -147,18 +147,19 @@ def synchronize(remote_pk, repository_pk, mirror):
         remote_pk (str): The remote PK.
         repository_pk (str): The repository PK.
         mirror (bool): True for mirror mode, False for additive.
+        optimize (bool): Optimize mode.
 
     Raises:
         ValueError: If the remote does not specify a URL to sync
 
     """
     remote = AptRemote.objects.get(pk=remote_pk)
-    repository = Repository.objects.get(pk=repository_pk)
+    repository = AptRepository.objects.get(pk=repository_pk)
 
     if not remote.url:
         raise ValueError(_("A remote must have a url specified to synchronize."))
 
-    first_stage = DebFirstStage(remote)
+    first_stage = DebFirstStage(remote, optimize, repository)
     DebDeclarativeVersion(first_stage, repository, mirror=mirror).create()
 
 
@@ -498,16 +499,19 @@ class DebFirstStage(Stage):
     The first stage of a pulp_deb sync pipeline.
     """
 
-    def __init__(self, remote, *args, **kwargs):
+    def __init__(self, remote, optimize, repository, *args, **kwargs):
         """
         The first stage of a pulp_deb sync pipeline.
 
         Args:
-            remote (FileRemote): The remote data to be used when syncing
-
+            remote (AptRemote): The remote data to be used when syncing
+            optimize (Boolean): If optimize mode is enabled or not
+            repository (AptRepository): The repository data used for last sync detail checks
         """
         super().__init__(*args, **kwargs)
         self.remote = remote
+        self.optimize = optimize
+        self.repository = repository
         self.parsed_url = urlparse(remote.url)
 
     async def run(self):
@@ -536,6 +540,22 @@ class DebFirstStage(Stage):
             deferred_download=False,
         )
 
+    def _has_remote_changed(self):
+        ro_compare_dict = self._gen_remote_options()
+        ro_last_sync = self.repository.last_sync_details["remote_options"]
+        for key in ro_last_sync:
+            if ro_last_sync[key] != ro_compare_dict[key]:
+                return True
+        return False
+
+    def _gen_remote_options(self):
+        return {
+            "distributions": self.remote.distributions,
+            "components": self.remote.components,
+            "architectures": self.remote.architectures,
+            "policy": self.remote.policy,
+        }
+
     async def _handle_distribution(self, distribution):
         log.info(_('Downloading Release file for distribution: "{}"').format(distribution))
         # Create release_file
@@ -553,7 +573,32 @@ class DebFirstStage(Stage):
         release_file = await self._create_unit(release_file_dc)
         if release_file is None:
             return
-        # Create release object
+        if self.optimize and distribution in self.repository.last_sync_details:
+            last_sync_dist_details = self.repository.last_sync_details[distribution]
+            if not self._has_remote_changed():
+                if (
+                    last_sync_dist_details["artifact_set_sha256"]
+                    == release_file.artifact_set_sha256
+                ):
+                    log.info(
+                        f"ReleaseFile has not changed for distribution {distribution}. Skip sync"
+                    )
+                    async with ProgressReport(
+                        message="Skipping ReleaseFile sync (no change from previous sync)",
+                        code="sync.release_file.was_skipped",
+                    ) as pb:
+                        await pb.aincrement()
+                    return
+        self.repository.last_sync_details["remote_options"] = self._gen_remote_options()
+        if distribution in self.repository.last_sync_details:
+            self.repository.last_sync_details[distribution][
+                "artifact_set_sha256"
+            ] = release_file.artifact_set_sha256
+        else:
+            self.repository.last_sync_details[distribution] = {
+                "artifact_set_sha256": release_file.artifact_set_sha256,
+            }
+
         release_unit = Release(
             codename=release_file.codename, suite=release_file.suite, distribution=distribution
         )
@@ -798,6 +843,45 @@ class DebFirstStage(Stage):
                 return
             else:
                 raise NoPackageIndexFile(relative_dir=package_index_dir)
+
+        distribution = release_file.distribution
+        component = release_component.component
+        if component not in self.repository.last_sync_details[distribution]:
+            last_pi_details = {}
+        else:
+            if architecture not in self.repository.last_sync_details[distribution][component]:
+                last_pi_details = {}
+            else:
+                last_pi_details = self.repository.last_sync_details[distribution][component][
+                    architecture
+                ]
+        if self.optimize and "artifact_set_sha256" in last_pi_details:
+            if package_index.artifact_set_sha256 == last_pi_details["artifact_set_sha256"]:
+                log.info(f"PackageIndex has not changed for path: {relative_path}. Skip sync.")
+                async with ProgressReport(
+                    message="Skipping PackageIndex sync (no change from previous sync)",
+                    code="sync.package_index.was_skipped",
+                ) as pb:
+                    await pb.aincrement()
+                return
+        if last_pi_details:
+            self.repository.last_sync_details[distribution][component][architecture][
+                "artifact_set_sha256"
+            ] = package_index.artifact_set_sha256
+        else:
+            if component not in self.repository.last_sync_details[distribution]:
+                last_pi_details[component] = {}
+                last_pi_details[component][architecture] = {
+                    "artifact_set_sha256": package_index.artifact_set_sha256
+                }
+            else:
+                last_pi_details[component] = self.repository.last_sync_details[distribution][
+                    component
+                ]
+                last_pi_details[component][architecture] = {
+                    "artifact_set_sha256": package_index.artifact_set_sha256
+                }
+            self.repository.last_sync_details[distribution] |= last_pi_details
 
         # Interpret policy to download Artifacts or not
         deferred_download = self.remote.policy != Remote.IMMEDIATE

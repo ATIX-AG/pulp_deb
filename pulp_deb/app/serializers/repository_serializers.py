@@ -1,5 +1,9 @@
 from gettext import gettext as _
-from pulpcore.plugin.serializers import RepositorySerializer, validate_unknown_fields
+from pulpcore.plugin.serializers import (
+    RepositorySerializer,
+    RepositorySyncURLSerializer,
+    validate_unknown_fields,
+)
 
 from pulp_deb.app.models import AptRepository
 
@@ -16,6 +20,16 @@ class AptRepositorySerializer(RepositorySerializer):
     class Meta:
         fields = RepositorySerializer.Meta.fields
         model = AptRepository
+
+
+class AptRepositorySyncURLSerializer(RepositorySyncURLSerializer):
+    """
+    A Serializer for AptRepository Sync.
+    """
+
+    optimize = serializers.BooleanField(
+        help_text=_("Whether or not to optimize sync."), required=False, default=True
+    )
 
 
 class CopySerializer(serializers.Serializer):

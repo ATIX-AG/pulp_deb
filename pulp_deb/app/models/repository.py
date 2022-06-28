@@ -1,3 +1,4 @@
+from django.db import models
 from pulpcore.plugin.models import Repository
 
 from pulpcore.plugin.repo_version_utils import remove_duplicates, validate_repo_version
@@ -38,6 +39,8 @@ class AptRepository(Repository):
     REMOTE_TYPES = [
         AptRemote,
     ]
+
+    last_sync_details = models.JSONField(default=dict)
 
     class Meta:
         default_related_name = "%(app_label)s_%(model_name)s"
