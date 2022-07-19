@@ -7,6 +7,7 @@ import gzip
 import lzma
 import gnupg
 import hashlib
+import json
 
 from asgiref.sync import sync_to_async
 from collections import defaultdict
@@ -22,6 +23,7 @@ from pulpcore.plugin.models import (
     Artifact,
     ProgressReport,
     Remote,
+    RepositoryVersion,
 )
 
 from pulpcore.plugin.stages import (
@@ -155,11 +157,14 @@ def synchronize(remote_pk, repository_pk, mirror, optimize):
     """
     remote = AptRemote.objects.get(pk=remote_pk)
     repository = AptRepository.objects.get(pk=repository_pk)
+    repository_version = RepositoryVersion.objects.filter(repository=repository).latest(
+        "repository_id"
+    )
 
     if not remote.url:
         raise ValueError(_("A remote must have a url specified to synchronize."))
 
-    first_stage = DebFirstStage(remote, optimize, repository)
+    first_stage = DebFirstStage(remote, optimize, repository_version)
     DebDeclarativeVersion(first_stage, repository, mirror=mirror).create()
 
 
@@ -499,7 +504,7 @@ class DebFirstStage(Stage):
     The first stage of a pulp_deb sync pipeline.
     """
 
-    def __init__(self, remote, optimize, repository, *args, **kwargs):
+    def __init__(self, remote, optimize, repository_version, *args, **kwargs):
         """
         The first stage of a pulp_deb sync pipeline.
 
@@ -511,7 +516,7 @@ class DebFirstStage(Stage):
         super().__init__(*args, **kwargs)
         self.remote = remote
         self.optimize = optimize
-        self.repository = repository
+        self.repository_version = repository_version
         self.parsed_url = urlparse(remote.url)
 
     async def run(self):
@@ -540,11 +545,10 @@ class DebFirstStage(Stage):
             deferred_download=False,
         )
 
-    def _has_remote_changed(self):
-        ro_compare_dict = self._gen_remote_options()
-        ro_last_sync = self.repository.last_sync_details["remote_options"]
-        for key in ro_last_sync:
-            if ro_last_sync[key] != ro_compare_dict[key]:
+    def _has_remote_changed(self, sync_details):
+        compare_dict = self._gen_remote_options()
+        for key in sync_details["remote_options"]:
+            if sync_details["remote_options"][key] != compare_dict[key]:
                 return True
         return False
 
@@ -573,11 +577,11 @@ class DebFirstStage(Stage):
         release_file = await self._create_unit(release_file_dc)
         if release_file is None:
             return
-        if self.optimize and distribution in self.repository.last_sync_details:
-            last_sync_dist_details = self.repository.last_sync_details[distribution]
-            if not self._has_remote_changed():
+        sync_details = defaultdict(dict, self.repository_version.sync_details)
+        if self.optimize and distribution in sync_details:
+            if not self._has_remote_changed(sync_details):
                 if (
-                    last_sync_dist_details["artifact_set_sha256"]
+                    sync_details[distribution]["artifact_set_sha256"]
                     == release_file.artifact_set_sha256
                 ):
                     log.info(
@@ -589,15 +593,10 @@ class DebFirstStage(Stage):
                     ) as pb:
                         await pb.aincrement()
                     return
-        self.repository.last_sync_details["remote_options"] = self._gen_remote_options()
-        if distribution in self.repository.last_sync_details:
-            self.repository.last_sync_details[distribution][
-                "artifact_set_sha256"
-            ] = release_file.artifact_set_sha256
-        else:
-            self.repository.last_sync_details[distribution] = {
-                "artifact_set_sha256": release_file.artifact_set_sha256,
-            }
+        sync_details["remote_options"] = self._gen_remote_options()
+        sync_details[distribution]["artifact_set_sha256"] = release_file.artifact_set_sha256
+        self.repository_version.sync_details = dict(sync_details)
+        await _save_sync_details(self.repository_version)
 
         release_unit = Release(
             codename=release_file.codename, suite=release_file.suite, distribution=distribution
@@ -778,6 +777,14 @@ class DebFirstStage(Stage):
         # Await all tasks
         await asyncio.gather(*pending_tasks)
 
+    def _nested_defaultdict(self, existing=None, **kwargs):
+        if existing is None:
+            existing = {}
+        if not isinstance(existing, dict):
+            return existing
+        existing = {key: self._nested_defaultdict(val) for key, val in existing.items()}
+        return defaultdict(self._nested_defaultdict, existing, **kwargs)
+
     async def _handle_package_index(
         self,
         release_file,
@@ -846,17 +853,15 @@ class DebFirstStage(Stage):
 
         distribution = release_file.distribution
         component = release_component.component
-        if component not in self.repository.last_sync_details[distribution]:
-            last_pi_details = {}
-        else:
-            if architecture not in self.repository.last_sync_details[distribution][component]:
-                last_pi_details = {}
-            else:
-                last_pi_details = self.repository.last_sync_details[distribution][component][
-                    architecture
-                ]
-        if self.optimize and "artifact_set_sha256" in last_pi_details:
-            if package_index.artifact_set_sha256 == last_pi_details["artifact_set_sha256"]:
+        sync_details = self._nested_defaultdict(self.repository_version.sync_details)
+        if (
+            self.optimize
+            and "artifact_set_sha256" in sync_details[distribution][component][architecture]
+        ):
+            if (
+                package_index.artifact_set_sha256
+                == sync_details[distribution][component][architecture]["artifact_set_sha256"]
+            ):
                 log.info(f"PackageIndex has not changed for path: {relative_path}. Skip sync.")
                 async with ProgressReport(
                     message="Skipping PackageIndex sync (no change from previous sync)",
@@ -864,24 +869,17 @@ class DebFirstStage(Stage):
                 ) as pb:
                     await pb.aincrement()
                 return
-        if last_pi_details:
-            self.repository.last_sync_details[distribution][component][architecture][
-                "artifact_set_sha256"
-            ] = package_index.artifact_set_sha256
-        else:
-            if component not in self.repository.last_sync_details[distribution]:
-                last_pi_details[component] = {}
-                last_pi_details[component][architecture] = {
-                    "artifact_set_sha256": package_index.artifact_set_sha256
-                }
-            else:
-                last_pi_details[component] = self.repository.last_sync_details[distribution][
-                    component
-                ]
-                last_pi_details[component][architecture] = {
-                    "artifact_set_sha256": package_index.artifact_set_sha256
-                }
-            self.repository.last_sync_details[distribution] |= last_pi_details
+        sync_details[distribution][component][architecture][
+            "artifact_set_sha256"
+        ] = package_index.artifact_set_sha256
+
+        # Generating the remote options here again. The function `_nested_defaultdict()` has the
+        # default behavior to override every `None` value as an empty `dict` in order to be able
+        # to create multiple layers of nested `defaultdict`. So it is safer to generate the remote
+        # options here again in case any of them has a `None` value.
+        sync_details["remote_options"] = self._gen_remote_options()
+        self.repository_version.sync_details = json.loads(json.dumps(sync_details))
+        await _save_sync_details(self.repository_version)
 
         # Interpret policy to download Artifacts or not
         deferred_download = self.remote.policy != Remote.IMMEDIATE
@@ -1099,6 +1097,11 @@ class DebFirstStage(Stage):
             await self.put(
                 DeclarativeContent(content=content_unit, d_artifacts=translation["d_artifacts"])
             )
+
+
+@sync_to_async
+def _save_sync_details(repo_version):
+    repo_version.save(update_fields=["sync_details"])
 
 
 @sync_to_async
