@@ -3,7 +3,7 @@
 set -e
 
 RELEASE_FILE="$(/usr/bin/readlink -f $1)"
-OUTPUT_DIR="$(/usr/bin/mktemp -d)"
+OUTPUT_DIR="${PULP_TEMP_WORKING_DIR}"
 DETACHED_SIGNATURE_PATH="${OUTPUT_DIR}/Release.gpg"
 INLINE_SIGNATURE_PATH="${OUTPUT_DIR}/InRelease"
 GPG_KEY_ID="Pulp QE"
