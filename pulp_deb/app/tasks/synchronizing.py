@@ -7,9 +7,11 @@ import gzip
 import lzma
 import gnupg
 import hashlib
+import subprocess
 
 from asgiref.sync import sync_to_async
 from collections import defaultdict
+from functools import wraps
 from tempfile import NamedTemporaryFile
 from debian import deb822
 from urllib.parse import quote, urlparse, urlunparse
@@ -347,6 +349,22 @@ class DebUpdateReleaseFileAttributes(Stage):
     It also transfers the sha256 from the artifact to the ReleaseFile content units.
     """
 
+    def _gpg_agent_cleanup(func):
+        @wraps(func)
+        def wrapper(self, *args, **kwargs):
+            try:
+                return func(self, *args, **kwargs)
+            finally:
+                if self.gpg:
+                    subprocess.run(
+                        ["/usr/bin/gpgconf", "--homedir", self.gpg.gnupghome, "--kill", "gpg-agent"],
+                        check=False,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+        return wrapper
+
+    @_gpg_agent_cleanup
     def __init__(self, remote, *args, **kwargs):
         """Initialize DebUpdateReleaseFileAttributes stage."""
         super().__init__(*args, **kwargs)
