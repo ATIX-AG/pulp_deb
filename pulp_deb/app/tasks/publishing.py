@@ -200,6 +200,7 @@ def publish(
                     distribution = settings.STRUCTURED_EMPTY_REPO_DISTRIBUTION
                     components = [settings.STRUCTURED_EMPTY_REPO_COMPONENT]
                     architectures = list(settings.STRUCTURED_EMPTY_REPO_ARCHITECTURES)
+
                     if "all" not in architectures:
                         architectures.append("all")
 
@@ -223,17 +224,20 @@ def publish(
                         temp_dir=temp_dir,
                         signing_service=signing_service,
                     )
+
                     release_helper.save_unsigned_metadata()
                     release_helpers.append(release_helper)
+
                 else:
                     for distribution in distributions:
+                        release_arch_qs = ReleaseArchitecture.objects.filter(
+                            pk__in=repo_version.content.order_by("-pulp_created"),
+                            distribution=distribution,
+                        )
                         architectures = list(
-                            ReleaseArchitecture.objects.filter(
-                                pk__in=repo_version.content.order_by("-pulp_created"),
-                                distribution=distribution,
+                            release_arch_qs.distinct("architecture").values_list(
+                                "architecture", flat=True
                             )
-                            .distinct("architecture")
-                            .values_list("architecture", flat=True)
                         )
                         if "all" not in architectures:
                             architectures.append("all")
@@ -300,16 +304,28 @@ def publish(
                         )
 
                         for component in components:
+                            prcs_for_component = [
+                                prc
+                                for prc in package_release_components
+                                if prc.release_component.component == component
+                            ]
                             packages = Package.objects.filter(
-                                pk__in=[
-                                    prc.package.pk
-                                    for prc in package_release_components
-                                    if prc.release_component.component == component
-                                ]
+                                pk__in=[prc.package.pk for prc in prcs_for_component]
                             ).prefetch_related("contentartifact_set", "_artifacts")
                             artifact_dict, remote_artifact_dict = _batch_fetch_artifacts(packages)
+
+                            pkg_by_pk = {package.pk: package for package in packages}
+                            package_pairs = [
+                                (
+                                    pkg_by_pk[prc.package.pk],
+                                    prc.index_architecture
+                                    or pkg_by_pk[prc.package.pk].architecture,
+                                )
+                                for prc in prcs_for_component
+                                if prc.package.pk in pkg_by_pk
+                            ]
                             release_helper.components[component].add_packages(
-                                packages,
+                                package_pairs,
                                 artifact_dict,
                                 remote_artifact_dict,
                             )
@@ -379,55 +395,95 @@ class _ComponentHelper:
             source_index_path,
         )
 
-    def add_packages(self, packages, artifact_dict, remote_artifact_dict):
+    def add_packages(self, package_pairs, artifact_dict, remote_artifact_dict):
         published_artifacts = []
-        package_data = []
+
+        normalized_pairs = []
+        for item in package_pairs:
+            if isinstance(item, tuple):
+                package, index_arch = item
+            else:
+                package = item
+                index_arch = package.architecture
+            normalized_pairs.append((package, index_arch))
+
+        packages = [p for (p, _idx) in normalized_pairs]
 
         content_artifacts = {
             package.pk: list(package.contentartifact_set.all()) for package in packages
         }
         layout = self.parent.publication.layout
+        seen_published_artifacts = set()
+        seen_package_index_entries = set()
 
-        for package in packages:
-            with suppress(IntegrityError):
-                content_artifact = content_artifacts.get(package.pk, [None])[0]
-                published_artifact = PublishedArtifact(
-                    relative_path=package.filename(self.component, layout=layout),
-                    publication=self.parent.publication,
-                    content_artifact=content_artifact,
-                )
-                published_artifacts.append(published_artifact)
-                package_data.append((package, package.architecture))
-                # In the NESTED_BY_BOTH layout, we want to _also_ publish the package under the
-                # alphabetical path but _not_ reference it in the repo metadata.
-                if layout == LAYOUT_TYPES.NESTED_BY_BOTH:
-                    alt_published_artifact = PublishedArtifact(
-                        relative_path=package.filename(
-                            self.component, layout=LAYOUT_TYPES.NESTED_ALPHABETICALLY
-                        ),
+        for package, index_arch in normalized_pairs:
+            content_artifact = content_artifacts.get(package.pk, [None])[0]
+            if content_artifact is None:
+                continue
+            upstream_basename = os.path.basename(content_artifact.relative_path)
+            primary_relpath = package.filename(
+                self.component, layout=layout, basename_override=upstream_basename
+            )
+            published_artifact_key = (content_artifact.pk, primary_relpath)
+            if published_artifact_key not in seen_published_artifacts:
+                seen_published_artifacts.add(published_artifact_key)
+                published_artifacts.append(
+                    PublishedArtifact(
+                        relative_path=primary_relpath,
                         publication=self.parent.publication,
                         content_artifact=content_artifact,
                     )
-                    published_artifacts.append(alt_published_artifact)
+                )
+
+            # In the NESTED_BY_BOTH layout, we want to _also_ publish the package under the
+            # alphabetical path but _not_ reference it in the repo metadata.
+            if layout == LAYOUT_TYPES.NESTED_BY_BOTH:
+                alt_relpath = package.filename(
+                    self.component,
+                    layout=LAYOUT_TYPES.NESTED_ALPHABETICALLY,
+                    basename_override=upstream_basename,
+                )
+                alt_published_artifact_key = (content_artifact.pk, alt_relpath)
+                if alt_published_artifact_key not in seen_published_artifacts:
+                    seen_published_artifacts.add(alt_published_artifact_key)
+                    published_artifacts.append(
+                        PublishedArtifact(
+                            relative_path=alt_relpath,
+                            publication=self.parent.publication,
+                            content_artifact=content_artifact,
+                        )
+                    )
+
+            metadata_arch = "all" if package.architecture == "all" else index_arch
+            package_index_entry = (package.pk, metadata_arch)
+            if package_index_entry in seen_package_index_entries:
+                continue
+            seen_package_index_entries.add(package_index_entry)
+
+            package_serializer = Package822Serializer(package, context={"request": None})
+            try:
+                package_serializer.to822(
+                    self.component,
+                    artifact_dict,
+                    remote_artifact_dict,
+                    layout=layout,
+                    basename_override=upstream_basename,
+                ).dump(self.package_index_files[metadata_arch][0])
+            except KeyError:
+                log.warning(
+                    "Published package '%s' with index architecture '%s' was not added to "
+                    "component '%s' in distribution '%s' because it lacks this architecture!",
+                    getattr(package, "relative_path", None) or getattr(package, "pk", None),
+                    metadata_arch,
+                    self.component,
+                    self.parent.distribution,
+                )
+            else:
+                self.package_index_files[metadata_arch][0].write(b"\n")
 
         with transaction.atomic():
             if published_artifacts:
                 PublishedArtifact.objects.bulk_create(published_artifacts, ignore_conflicts=True)
-
-        for package, architecture in package_data:
-            package_serializer = Package822Serializer(package, context={"request": None})
-            try:
-                package_serializer.to822(
-                    self.component, artifact_dict, remote_artifact_dict, layout=layout
-                ).dump(self.package_index_files[architecture][0])
-            except KeyError:
-                log.warn(
-                    f"Published package '{package.relative_path}' with architecture "
-                    f"'{architecture}' was not added to component '{self.component}' in "
-                    f"distribution '{self.parent.distribution}' because it lacks this architecture!"
-                )
-            else:
-                self.package_index_files[architecture][0].write(b"\n")
 
     # Publish DSC file and setup to create Sources Indices file
     def add_source_packages(self, source_packages):

@@ -317,6 +317,7 @@ class BasePackage822Serializer(SingleArtifactContentSerializer):
         "source": "Source",
         "version": "Version",
         "architecture": "Architecture",
+        "architecture_variant": "Architecture-Variant",
         "section": "Section",
         "priority": "Priority",
         "origin": "Origin",
@@ -349,6 +350,7 @@ class BasePackage822Serializer(SingleArtifactContentSerializer):
     source = CharField(required=False)
     version = CharField()
     architecture = CharField()
+    architecture_variant = CharField(required=False)
     section = CharField(required=False)
     priority = CharField(required=False)
     origin = CharField(required=False)
@@ -482,6 +484,7 @@ class BasePackage822Serializer(SingleArtifactContentSerializer):
         artifact_dict=None,
         remote_artifact_dict=None,
         layout=LAYOUT_TYPES.NESTED_ALPHABETICALLY,
+        basename_override=None,
     ):
         """Create deb822.Package object from model."""
         ret = deb822.Packages()
@@ -506,7 +509,15 @@ class BasePackage822Serializer(SingleArtifactContentSerializer):
             ret.update({"SHA1": artifact.sha1} if artifact.sha1 else {})
             ret.update({"SHA256": artifact.sha256})
             ret.update({"Size": str(artifact.size)})
-        ret.update({"Filename": self.instance.filename(component, layout=layout)})
+        ret.update(
+            {
+                "Filename": self.instance.filename(
+                    component,
+                    layout=layout,
+                    basename_override=basename_override,
+                )
+            }
+        )
 
         return ret
 
@@ -516,6 +527,7 @@ class BasePackage822Serializer(SingleArtifactContentSerializer):
             "source",
             "version",
             "architecture",
+            "architecture_variant",
             "section",
             "priority",
             "origin",

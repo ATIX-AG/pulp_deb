@@ -200,7 +200,7 @@ def handle_duplicate_packages(new_version):
         Package.get_pulp_type(): Package,
         InstallerPackage.get_pulp_type(): InstallerPackage,
     }
-    repo_key_fields = ("package", "version", "architecture")
+    repo_key_fields = ("package", "version", "architecture", "architecture_variant")
 
     for pulp_type, package_obj in package_types.items():
         # First handle duplicates within the packages added to new_version
