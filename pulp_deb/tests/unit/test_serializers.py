@@ -1,11 +1,13 @@
 import unittest
 
+from debian import deb822
 from django.test import TestCase
 
 from pulpcore.plugin.models import Artifact
 
 from pulp_deb.app.models import GenericContent
 from pulp_deb.app.serializers import GenericContentSerializer
+from pulp_deb.app.serializers.content_serializers import Package822Serializer
 
 
 # Fill data with sufficient information to create DebContent
@@ -37,3 +39,23 @@ class TestGenericContentSerializer(TestCase):
         data = {"_artifact": "/pulp/api/v3/artifacts/{}/".format(self.artifact.pk)}
         serializer = GenericContentSerializer(data=data)
         self.assertFalse(serializer.is_valid())
+
+
+def test_package_822_serializer_handles_architecture_variant():
+    """
+    Test that Architecture-Variant is stored as a real Package field.
+    """
+    paragraph = deb822.Packages()
+    paragraph["Package"] = "foo"
+    paragraph["Version"] = "1.0"
+    paragraph["Architecture"] = "amd64"
+    paragraph["Architecture-Variant"] = "amd64v3"
+    paragraph["Maintainer"] = "Example Maintainer <example@example.com>"
+    paragraph["Description"] = "Example package"
+
+    serializer = Package822Serializer.from822(paragraph)
+
+    assert serializer.is_valid(), serializer.errors
+    assert serializer.validated_data["architecture"] == "amd64"
+    assert serializer.validated_data["architecture_variant"] == "amd64v3"
+    assert "Architecture-Variant" not in serializer.validated_data.get("custom_fields", {})

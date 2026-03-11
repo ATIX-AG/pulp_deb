@@ -6,6 +6,7 @@ from pulp_deb.app.tasks.synchronizing import (
     _filter_split_architectures,
     _filter_split_components,
     _get_artifact_set_sha256,
+    filter_arch_tokens,
 )
 
 
@@ -141,6 +142,35 @@ class TestArchitectureFiltering(TestCase):
             )
             self.assertEqual(len(captured.records), 3)
             self.assertEqual(captured.records[0].getMessage(), expected_log_message)
+
+    def test_architecture_variant_filtering_keeps_base_and_variant(self):
+        """
+        Test that asking for both a base architecture and a variant architecture
+        keeps both indices.
+        """
+        release_file_architectures = "amd64 amd64v3"
+        remote_architectures = "amd64 amd64:v3"
+
+        self.assertEqual(
+            filter_arch_tokens(release_file_architectures, remote_architectures, "stable"),
+            [
+                ("amd64", "amd64", None),
+                ("amd64", "amd64v3", "v3"),
+            ],
+        )
+
+    def test_architecture_variant_filtering_does_not_include_missing_variant(self):
+        """
+        Test that a requested variant is not accepted unless the upstream Release
+        file advertises the published variant architecture.
+        """
+        release_file_architectures = "amd64"
+        remote_architectures = "amd64:v3"
+
+        self.assertEqual(
+            filter_arch_tokens(release_file_architectures, remote_architectures, "stable"),
+            [],
+        )
 
 
 class TestComponentFiltering(TestCase):
