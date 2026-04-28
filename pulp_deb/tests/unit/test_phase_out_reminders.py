@@ -1,6 +1,7 @@
 """Scheduled reminders disguised as tests — these exist to nag, not to verify behavior."""
 
 from importlib.metadata import requires as pkg_requires
+
 from packaging.requirements import Requirement
 from packaging.version import Version
 
