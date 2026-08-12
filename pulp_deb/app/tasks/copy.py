@@ -41,11 +41,14 @@ def find_structured_publish_content(content, source_repo_version):
     prc_qs = PackageReleaseComponent.objects.filter(pk__in=prc_content_qs.only("pk"))
 
     # ReleaseComponents:
+    release_components = prc_qs.values_list(
+        "release_component_id", "release_component__distribution"
+    ).distinct()
     release_component_ids = set()
     distributions = set()
-    for prc in prc_qs.select_related("release_component").iterator():
-        release_component_ids.add(prc.release_component.pk)
-        distributions.add(prc.release_component.distribution)
+    for release_component_id, distribution in release_components:
+        release_component_ids.add(release_component_id)
+        distributions.add(distribution)
 
     release_component_content_qs = source_repo_version.content.filter(
         pk__in=release_component_ids
